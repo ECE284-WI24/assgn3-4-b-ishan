@@ -234,6 +234,9 @@ __global__ void kmerPosConcat(
     int tx = threadIdx.x;
     int bx = blockIdx.x;
 
+    int bs = blockDim.x;
+    int gs = gridDim.x;
+
     uint32_t N = d_seqLen;
     uint32_t compressedSeqLen = (N+15)/16;
     uint32_t k = kmerSize;
@@ -243,23 +246,36 @@ __global__ void kmerPosConcat(
     uint32_t mask = (1 << 2*k)-1;
     uint64_t kmer = 0;
 
-    if ((bx == 0) && (tx == 0)) {
-        for (uint32_t i = 0; i <= N-k; i++) {
-            uint32_t index = i/16;
-            uint32_t shift1 = 2*(i%16);
-            uint64_t val1 = d_compressedSeq[index];
-            uint64_t val2 = (index+1 < compressedSeqLen) ? d_compressedSeq[index+1] : 0;
-            if (shift1 > 0) {
-                uint32_t shift2 = (32-shift1);
-                kmer = ((val1 >> shift1) | (val2 << shift2)) & mask;
-            } else {
-                kmer = val1 & mask;
-            }
-
-            uint64_t kPosConcat = (kmer << 32) + i;
-            d_kmerPos[i] = kPosConcat;
-        }
+    uint32_t iterPerThread = (N - k) / (bs * gs);
+    if ((N - k) % (bs * gs) != 0) {
+        iterPerThread++;
     }
+
+    // startIndex and endIndex are inclusive values
+    uint32_t startIndex = (bs * bx + tx) * iterPerThread;
+    uint32_t endIndex   = startIndex + iterPerThread - 1; 
+
+    if (endIndex > (N - k)) {
+        endIndex = N - k;
+    }
+
+    for (uint32_t i = startIndex; i <= endIndex; i++) {
+
+        uint32_t index = i / 16;
+        uint32_t shift1 = 2 * (i % 16);
+        if (shift1 > 0) {
+            uint32_t shift2 = 32-shift1;
+            kmer = ((d_compressedSeq[index] >> shift1) | (d_compressedSeq[index+1] << shift2)) & mask;
+        } else {
+            kmer = d_compressedSeq[index] & mask;
+        }
+
+        // Concatenate kmer value (first 32-bits) with its position (last
+        // 32-bits)
+        size_t kPosConcat = (kmer << 32) + i;
+        d_kmerPos[i] = kPosConcat;
+    }
+
 }
 
 /**
@@ -281,12 +297,28 @@ __global__ void kmerOffsetFill(
     int tx = threadIdx.x;
     int bx = blockIdx.x;
 
+    int bs = blockDim.x;
+    int gs = gridDim.x;
+
     uint32_t N = seqLen;
     uint32_t k = kmerSize;
 
     uint64_t mask = ((uint64_t) 1 << 32)-1;
     uint32_t kmer = 0;
     uint32_t lastKmer = 0;
+
+    uint32_t iterPerThread = (N - k) / (bs * gs);
+    if ((N - k) % (bs * gs) != 0) {
+        iterPerThread++;
+    }
+
+    // startIndex and endIndex are inclusive values
+    uint32_t startIndex = (bs * bx + tx) * iterPerThread;
+    uint32_t endIndex   = startIndex + iterPerThread - 1; 
+
+    if (endIndex > (N - k)) {
+        endIndex = N - k;
+    }
 
     if ((bx == 0) && (tx == 0)) {
         for (uint32_t i = 0; i <= N-k; i++) {
@@ -305,6 +337,28 @@ __global__ void kmerOffsetFill(
             d_kmerOffset[j] = N-k;
         }
     }
+
+    // for (uint32_t i = startIndex; i <= endIndex; i++) {
+    //     kmer = (d_kmerPos[i] >> 32) & mask;
+    //     if (kmer != lastKmer) {
+    //         for (auto j=lastKmer; j<kmer; j++) {
+    //             d_kmerOffset[j] = i;
+    //         }
+    //     }
+    //     lastKmer = kmer;
+    // }
+
+    // if (endIndex >= (N - k)) {
+    //     for (auto j=lastKmer; j<numKmers; j++) {
+    //         d_kmerOffset[j] = N-k;
+    //     }
+    // }
+    // if ((bx == 0) && (tx == 0)) {
+    //     for (auto j=lastKmer; j<numKmers; j++) {
+    //         d_kmerOffset[j] = N-k;
+    //     }
+    // }
+
 }
 
 /**
@@ -343,8 +397,8 @@ void GpuReadMapper::seedTableOnGpu (
     uint32_t* kmerOffset,
     uint64_t* kmerPos) {
 
-    int numBlocks = 1; // i.e. number of thread blocks on the GPU
-    int blockSize = 1; // i.e. number of GPU threads per thread block
+    int numBlocks = 64; // i.e. number of thread blocks on the GPU
+    int blockSize = 32; // i.e. number of GPU threads per thread block
 
     kmerPosConcat<<<numBlocks, blockSize>>>(compressedSeq, seqLen, kmerSize, kmerPos);
 
@@ -376,121 +430,179 @@ void GpuReadMapper::seedTableOnGpu (
  *  6. Any additional optimization you can think of that improves performance
  *  7. You may assume a read length (readSize) of 256
  * */
-__global__ void readMapper(
-        uint64_t batchSize,
-        uint32_t readLen,
-        uint32_t* d_compressedReadBatch,
-        uint32_t* d_kmerOffset,
-        uint64_t* d_kmerPos,
-        uint32_t kmerSize,
-        uint32_t kmerWindow,
-        uint32_t* d_compressedRef,
-        uint32_t refLen,
-        uint32_t* d_mappingScores,
-        uint32_t* d_mappingStartCoords,
-        uint32_t* d_mappingEndCoords) {
+__global__ void readMapper(uint64_t batchSize,
+    uint32_t readLen,
+    uint32_t * d_compressedReadBatch,
+    uint32_t * d_kmerOffset,
+    uint64_t * d_kmerPos,
+    uint32_t kmerSize,
+    uint32_t kmerWindow,
+    uint32_t * d_compressedRef,
+    uint32_t refLen,
+    uint32_t * d_mappingScores,
+    uint32_t * d_mappingStartCoords,
+    uint32_t * d_mappingEndCoords) 
+{
 
     int tx = threadIdx.x;
     int bx = blockIdx.x;
 
-    __shared__ uint64_t windowKmerPos[32];
-    uint32_t kmerMask = (1 << 2*kmerSize) - 1;
+    int bs = blockDim.x;
+    int gs = gridDim.x;
+
+    __shared__ uint64_t seed_set[512];
+    __shared__ uint32_t valid_seeds[512];
+    __shared__ uint32_t mapping_array[256];
+    uint32_t kmerMask = (1 << 2 * kmerSize) - 1;
     uint32_t posMask = (1 << 30) - 1;
     uint32_t twoBitMask = 3;
     uint64_t lastKmerPos = 16;
     uint64_t currKmerPos = 0;
 
-    uint32_t compressedReadLen = (readLen+15)/16;
-    if ((bx == 0) && (tx == 0)) {
-        for (uint64_t readNum=0; readNum<batchSize; readNum++) {
-            uint32_t startAddress = readNum*compressedReadLen;
-            uint32_t windowIdx = 0;
-            uint32_t bestMappingScore = 0;
-            uint32_t bestMappingStartCoords = 0;
-            uint32_t bestMappingEndCoords = 0;
-    
-            uint32_t numKmers = readLen-kmerSize+1;
-            
-            for (uint32_t i=0; i<numKmers; i++) {
-                uint32_t index = i/16;
-                uint32_t shift1 = 2*(i%16);
-                uint64_t val1 = d_compressedReadBatch[startAddress+index];
-                uint64_t val2 = (index+1 < compressedReadLen) ? d_compressedReadBatch[startAddress+index+1] : 0;
-                if (shift1 > 0) {
-                    uint32_t shift2 = (32-shift1);
-                    currKmerPos = ((val1 >> shift1) + (val2 << shift2)) & kmerMask;
-                } else {
-                    currKmerPos = val1 & kmerMask;
-                }
-                currKmerPos = (currKmerPos << 32) + i;
-                windowKmerPos[windowIdx] = currKmerPos;
-                windowIdx = (windowIdx+1)%kmerWindow;
+    uint32_t compressedReadLen = (readLen + 15) / 16;
+    if (bx < batchSize) {
+        uint64_t readNum = bx;
+        uint32_t startAddress = readNum * compressedReadLen;
+        uint32_t windowIdx = 0;
+        uint32_t bestMappingScore = 0;
+        uint32_t bestMappingStartCoords = 0;
+        uint32_t bestMappingEndCoords = 0;
 
-                if (i >= kmerWindow-1) {
-                    for (uint32_t w=0; w<kmerWindow; w++) {
-                        if (windowKmerPos[w] < currKmerPos) {
-                            currKmerPos = windowKmerPos[w];
-                        }
-                    }
+        uint32_t numKmers = readLen - kmerSize + 1;
 
-                    if (currKmerPos != lastKmerPos) {
-                        uint32_t kmer = (currKmerPos >> 32) & kmerMask; 
-                        uint32_t pos = currKmerPos & posMask;
-                        uint32_t e = d_kmerOffset[kmer];
-                        uint32_t s = 0;
-                        if (kmer > 0) {
-                            s = d_kmerOffset[kmer-1];
-                        }
-
-                        for (uint32_t p=s; p<e; p++) {
-                            uint32_t hitPos = d_kmerPos[p];
-                            uint32_t refStart=0, qStart=0;
-                            uint32_t alignLen = readLen;
-                                
-                            if (hitPos > pos) {
-                                refStart = hitPos-pos;
-                            }
-                            else {
-                                qStart = pos-hitPos;
-                            }
-                            if (refStart+readLen > refLen) {
-                                alignLen = refLen-refStart;
-                            }
-
-                            if (qStart > 0) {
-                                alignLen = min(alignLen , readLen-qStart);
-                            }
-
-                            uint32_t mappingScore=0;
-                            for (uint32_t j=0; j < alignLen; j++) {
-                                uint32_t rIndex = (refStart+j)/16;
-                                uint32_t rShift = 2*((refStart+j)%16);
-                                uint32_t qIndex = (qStart+j)/16;
-                                uint32_t qShift = 2*((qStart+j)%16);
-
-                                if (((d_compressedRef[rIndex] >> rShift) & twoBitMask) == 
-                                    ((d_compressedReadBatch[startAddress+qIndex] >> qShift) & twoBitMask)) {
-                                    mappingScore += 1;
-                                }
-                            }
-
-                            if (mappingScore > bestMappingScore) {
-                                bestMappingScore = mappingScore;
-                                bestMappingStartCoords = refStart; 
-                                bestMappingEndCoords = refStart+alignLen; 
-                            }
-                        }
-                    }
-
-                    lastKmerPos = currKmerPos;
-                }
-
+        for (uint32_t i = 0; i < numKmers; i++) {
+            uint64_t nextKmerPos = 0;
+            uint32_t index = i / 16;
+            uint32_t shift1 = 2 * (i % 16);
+            uint64_t val1 = d_compressedReadBatch[startAddress + index];
+            uint64_t val2 = (index + 1 < compressedReadLen) ? d_compressedReadBatch[startAddress + index + 1] : 0;
+            if (shift1 > 0) {
+                uint32_t shift2 = (32 - shift1);
+                currKmerPos = ((val1 >> shift1) + (val2 << shift2)) & kmerMask;
+            } else {
+                currKmerPos = val1 & kmerMask;
             }
 
-            d_mappingScores[readNum] =  bestMappingScore;
-            d_mappingStartCoords[readNum] =  bestMappingStartCoords;
-            d_mappingEndCoords[readNum] =  bestMappingEndCoords;
+            currKmerPos = (currKmerPos << 32) + i;
+
+            uint32_t next_index = (i + 1) / 16;
+            uint32_t nextshift1 = 2 * ((i + 1) % 16);
+            uint32_t nextval1 = d_compressedReadBatch[startAddress + next_index];
+            uint32_t nextval2 = (next_index + 1 < compressedReadLen) ? d_compressedReadBatch[startAddress + next_index + 1] : 0;
+            if (nextshift1 > 0) {
+                uint32_t nextshift2 = (32 - nextshift1);
+                nextKmerPos = ((nextval1 >> nextshift1) + (nextval2 << nextshift2)) & kmerMask;
+            } else {
+                nextKmerPos = nextval1 & kmerMask;
+            }
+            nextKmerPos = (nextKmerPos << 32) + i + 1;
+
+            seed_set[2 * i] = currKmerPos;
+            seed_set[2 * i + 1] = nextKmerPos;
+            valid_seeds[2 * i] = 0;
+            valid_seeds[0] = 1;
+            valid_seeds[2 * i + 1] = 0;
+            valid_seeds[1] = 1;
         }
+        int end_seed_cond = numKmers - 1;
+        int delta_seed = end_seed_cond / bs + 1;
+        int start_seed = tx * delta_seed;
+        uint32_t end_seed = (start_seed + delta_seed - 1 > end_seed_cond) ? end_seed_cond : start_seed + delta_seed - 1;
+        __syncthreads();
+        for (int w = 0; w < kmerWindow - 1; w++) {
+            for (int i = start_seed; i <= end_seed; i++) {
+                if (w > 0) {
+                    seed_set[2 * i + 1] = seed_set[2 * i + 2];
+                }
+            }
+            __syncthreads();
+            for (int i = start_seed; i <= end_seed; i++) {
+                if (seed_set[2 * i] > seed_set[2 * i + 1]) {
+                    seed_set[2 * i] = seed_set[2 * i + 1];
+                }
+            }
+            __syncthreads();
+        }
+        __syncthreads();
+        for (int i = 0; i < numKmers - 1; i++) {
+            if (seed_set[2 * i] != seed_set[2 * i + 2]) {
+                valid_seeds[2 * i + 2] = 1;
+            }
+        }
+        __syncthreads();
+        uint32_t start_val = 0;
+        for (uint32_t mx = start_val; mx <= 2 * (numKmers - 1 - (kmerWindow - 1)); mx += 2) {
+            uint64_t currKmerPos = seed_set[mx];
+            if (valid_seeds[mx] == 1) {
+                uint32_t kmer = (currKmerPos >> 32) & kmerMask;
+                uint32_t pos = currKmerPos & posMask;
+                uint32_t e = d_kmerOffset[kmer];
+                uint32_t s = 0;
+                if (kmer > 0) {
+                    s = d_kmerOffset[kmer - 1];
+                }
+                for (uint32_t p = s; p < e; p++) {
+                    uint32_t hitPos = d_kmerPos[p];
+                    uint32_t refStart = 0, qStart = 0;
+                    uint32_t alignLen = readLen;
+
+                    if (hitPos > pos) {
+                        refStart = hitPos - pos;
+                    } else {
+                        qStart = pos - hitPos;
+                    }
+                    if (refStart + readLen > refLen) {
+                        alignLen = refLen - refStart;
+                    }
+
+                    if (qStart > 0) {
+                        alignLen = min(alignLen, readLen - qStart);
+                    }
+                    uint32_t mappingScore = 0;
+                    for (int i = 0; i < 256; i++) {
+                        mapping_array[i] = 0;
+                    }
+                    __syncthreads();
+
+                    uint32_t j = tx;
+                    if (j < alignLen) {
+                        uint32_t rIndex = (refStart + j) / 16;
+                        uint32_t rShift = 2 * ((refStart + j) % 16);
+                        uint32_t qIndex = (qStart + j) / 16;
+                        uint32_t qShift = 2 * ((qStart + j) % 16);
+
+                        if (((d_compressedRef[rIndex] >> rShift) & twoBitMask) ==
+                            ((d_compressedReadBatch[startAddress + qIndex] >> qShift) &
+                                twoBitMask)) {
+
+                            mapping_array[tx] = 1;
+                        } else {
+                            mapping_array[tx] = 0;
+                        }
+                    } else if (j < 256) {
+                        mapping_array[tx] = 0;
+                    }
+
+                    __syncthreads();
+                    for (unsigned int s = 1; s < blockDim.x; s *= 2) {
+                        if (tx % (2 * s) == 0) {
+                            mapping_array[tx] += mapping_array[tx + s];
+                        }
+                        __syncthreads();
+                    }
+                    __syncthreads();
+                    mappingScore = mapping_array[0];
+                    if (mappingScore > bestMappingScore) {
+                        bestMappingScore = mappingScore;
+                        bestMappingStartCoords = refStart;
+                        bestMappingEndCoords = refStart + alignLen;
+                    }
+                }
+            }
+        }
+        d_mappingScores[readNum] = bestMappingScore;
+        d_mappingStartCoords[readNum] = bestMappingStartCoords;
+        d_mappingEndCoords[readNum] = bestMappingEndCoords;
     }
 }
 
@@ -508,8 +620,8 @@ void GpuReadMapper::mapReadBatch (
         uint32_t kmerWindow) {
 
     // 
-    int numBlocks = 1; // i.e. number of thread blocks on the GPU
-    int blockSize = 1; // i.e. number of GPU threads per thread block
+    int numBlocks = 64; // i.e. number of thread blocks on the GPU
+    int blockSize = 256; // i.e. number of GPU threads per thread block
 
     uint64_t numReads = readBatch->readDesc.size();
 
