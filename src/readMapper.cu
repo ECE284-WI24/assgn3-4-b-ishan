@@ -456,14 +456,12 @@ __global__ void readMapper(uint64_t batchSize,
     uint32_t kmerMask = (1 << 2 * kmerSize) - 1;
     uint32_t posMask = (1 << 30) - 1;
     uint32_t twoBitMask = 3;
-    uint64_t lastKmerPos = 16;
     uint64_t currKmerPos = 0;
 
     uint32_t compressedReadLen = (readLen + 15) / 16;
     if (bx < batchSize) {
         uint64_t readNum = bx;
         uint32_t startAddress = readNum * compressedReadLen;
-        uint32_t windowIdx = 0;
         uint32_t bestMappingScore = 0;
         uint32_t bestMappingStartCoords = 0;
         uint32_t bestMappingEndCoords = 0;
