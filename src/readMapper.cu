@@ -337,28 +337,6 @@ __global__ void kmerOffsetFill(
             d_kmerOffset[j] = N-k;
         }
     }
-
-    // for (uint32_t i = startIndex; i <= endIndex; i++) {
-    //     kmer = (d_kmerPos[i] >> 32) & mask;
-    //     if (kmer != lastKmer) {
-    //         for (auto j=lastKmer; j<kmer; j++) {
-    //             d_kmerOffset[j] = i;
-    //         }
-    //     }
-    //     lastKmer = kmer;
-    // }
-
-    // if (endIndex >= (N - k)) {
-    //     for (auto j=lastKmer; j<numKmers; j++) {
-    //         d_kmerOffset[j] = N-k;
-    //     }
-    // }
-    // if ((bx == 0) && (tx == 0)) {
-    //     for (auto j=lastKmer; j<numKmers; j++) {
-    //         d_kmerOffset[j] = N-k;
-    //     }
-    // }
-
 }
 
 /**
@@ -618,7 +596,7 @@ void GpuReadMapper::mapReadBatch (
         uint32_t kmerWindow) {
 
     // 
-    int numBlocks = 64; // i.e. number of thread blocks on the GPU
+    int numBlocks = 1000; // i.e. number of thread blocks on the GPU
     int blockSize = 256; // i.e. number of GPU threads per thread block
 
     uint64_t numReads = readBatch->readDesc.size();

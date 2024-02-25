@@ -14,4 +14,7 @@ export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${PWD}/tbb_cmake_build/tbb_cmake_build
 
 ## Basic run to map the first 40 reads in the reads.fa in batches of 10 reads
 ## HINT: may need to change values for the assignment tasks. You can create a sequence of commands
-./readMapper --reference ../data/reference.fa --reads ../data/reads.fa  --maxReads 40 --batchSize 10
+# ./readMapper --reference ../data/reference.fa --reads ../data/reads.fa  --maxReads 1000 --batchSize 10
+
+time ./readMapper --reference ../data/reference.fa --reads ../data/reads.fa  --maxReads 40 --batchSize 10 --numThreads 1
+
