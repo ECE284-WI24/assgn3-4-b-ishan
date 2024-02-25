@@ -16,5 +16,6 @@ export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${PWD}/tbb_cmake_build/tbb_cmake_build
 ## HINT: may need to change values for the assignment tasks. You can create a sequence of commands
 # ./readMapper --reference ../data/reference.fa --reads ../data/reads.fa  --maxReads 1000 --batchSize 10
 
-time ./readMapper --reference ../data/reference.fa --reads ../data/reads.fa  --maxReads 10000 --batchSize 1000 --numThreads 1
+time ./readMapper --reference ../data/reference.fa --reads ../data/reads.fa  --maxReads 150000 --batchSize 1000 --numThreads 8
+# nvprof ./readMapper --reference ../data/reference.fa --reads ../data/reads.fa  --maxReads 150000 --batchSize 10000 --numThreads 8
 
