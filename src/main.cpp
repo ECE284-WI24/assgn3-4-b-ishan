@@ -162,7 +162,6 @@ int main(int argc, char** argv) {
         tbb::filter::parallel,
         [](GpuReadMapper::ReadBatch* readBatch) {
             GpuReadMapper::clearReadBatch(readBatch);
-            std::cout<<"Inside last stage\n";
         })
 
     );
